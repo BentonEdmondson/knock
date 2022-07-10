@@ -1,0 +1,77 @@
+diff --git a/src/device.cpp b/src/device.cpp
+index 481a99b..800db26 100644
+--- a/src/device.cpp
++++ b/src/device.cpp
+@@ -36,12 +36,21 @@
+ #include <netinet/in.h>
+ #include <string.h>
+ 
++// patched with https://opensource.apple.com/source/Libc/Libc-825.26/uuid/uuidsrc/gen_uuid.c.auto.html `get_node_id`
++#if defined __APPLE__
++#include <net/if_dl.h>
++#  define HAVE_SA_LEN
++#endif
++
+ int get_mac_address(unsigned char* mac_address)
+ {
+     struct ifreq ifr;
+     struct ifconf ifc;
+     char buf[1024];
+     int success = 0;
++#if defined AF_LINK
++    struct sockaddr_dl *sdlp;
++#endif
+ 
+     int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
+     if (sock == -1) { EXCEPTION(gourou::DEV_MAC_ERROR, "Unable to create socket"); };
+@@ -50,14 +59,32 @@ int get_mac_address(unsigned char* mac_address)
+     ifc.ifc_buf = buf;
+     if (ioctl(sock, SIOCGIFCONF, &ifc) == -1) { EXCEPTION(gourou::DEV_MAC_ERROR, "SIOCGIFCONF ioctl failed"); }
+ 
+-    struct ifreq* it = ifc.ifc_req;
+-    const struct ifreq* const end = it + (ifc.ifc_len / sizeof(struct ifreq));
+-
+-    for (; it != end; ++it) {
++    struct ifreq* it;
++    int n = ifc.ifc_len;
++
++#if defined HAVE_SA_LEN
++#ifndef max
++#define max(a,b) ((a) > (b) ? (a) : (b))
++#endif
++#define ifreq_size(i) max(sizeof(struct ifreq),                     \
++                          sizeof((i).ifr_name)+(i).ifr_addr.sa_len)
++#else
++#define ifreq_size(i) sizeof(struct ifreq)
++#endif /* HAVE_SA_LEN*/
++
++    for (int i = 0; i < n; i+= ifreq_size(*it)) {
++      it = (struct ifreq *)((char *) ifc.ifc_buf+i);
+         strcpy(ifr.ifr_name, it->ifr_name);
+         if (ioctl(sock, SIOCGIFFLAGS, &ifr) == 0) {
+             if (! (ifr.ifr_flags & IFF_LOOPBACK)) { // don't count loopback
++#if defined SIOCGIFHWADDR
+                 if (ioctl(sock, SIOCGIFHWADDR, &ifr) == 0) {
++#elif defined AF_LINK
++                  sdlp = (struct sockaddr_dl *) &it->ifr_addr;
++                  if ((sdlp->sdl_family == AF_LINK) && (sdlp->sdl_alen == 6)) {
++#else
++                    {EXCEPTION(gourou::DEV_MAC_ERROR, "System doesnt support SIOCGIFHWADDR or AF_LINK"); return 1;
++#endif
+                     success = 1;
+                     break;
+                 }
+@@ -68,7 +95,12 @@ int get_mac_address(unsigned char* mac_address)
+ 
+     if (success)
+     {
+-	memcpy(mac_address, ifr.ifr_hwaddr.sa_data, 6);
++#if defined SIOCGIFHWADDR
++#  define HWADDR ifr.ifr_hwaddr.sa_data
++#elif defined AF_LINK
++#  define HWADDR (unsigned char *) &sdlp->sdl_data[sdlp->sdl_nlen]
++#endif
++	memcpy(mac_address, HWADDR, 6);
+ 	return 0;
+     }
+ 
